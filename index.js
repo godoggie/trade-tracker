@@ -171,21 +171,36 @@ async function sendEmail(message) {
   const recipients = getNotifyEmails();
   if (!recipients.length) return;
 
-  for (const to of recipients) {
-    // SMS gateways have ~160 char limit; truncate and strip subject
-    const sms = isSmsGateway(to);
-    const body = sms ? message.slice(0, 155) : message;
+  const emailAddrs = recipients.filter((r) => !isSmsGateway(r));
+  const smsAddrs = recipients.filter((r) => isSmsGateway(r));
 
+  // Send full message to email recipients
+  if (emailAddrs.length) {
     try {
       await transporter.sendMail({
         from: process.env.GMAIL_USER,
-        to,
-        subject: sms ? "" : "NHL Trade Alert",
-        text: body,
+        to: emailAddrs.join(","),
+        subject: "NHL Trade Alert",
+        text: message,
       });
-      log(`  Email sent to ${to} (${sms ? "SMS" : "email"})`);
+      log(`  Email sent to: ${emailAddrs.join(", ")}`);
     } catch (err) {
-      log(`  Failed to send to ${to}: ${err.message}`);
+      log(`  Failed to send email: ${err.message}`);
+    }
+  }
+
+  // Send truncated message to SMS gateways
+  if (smsAddrs.length) {
+    try {
+      await transporter.sendMail({
+        from: process.env.GMAIL_USER,
+        to: smsAddrs.join(","),
+        subject: "NHL Trade",
+        text: message.slice(0, 155),
+      });
+      log(`  SMS sent to: ${smsAddrs.join(", ")}`);
+    } catch (err) {
+      log(`  Failed to send SMS: ${err.message}`);
     }
   }
 }
