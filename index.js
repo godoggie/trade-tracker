@@ -1,7 +1,6 @@
 require("dotenv").config();
 const cron = require("node-cron");
 const cheerio = require("cheerio");
-const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -10,22 +9,19 @@ const NHL_URL = "https://www.nhl.com/news/2025-26-nhl-trades";
 const DATA_DIR = path.join(__dirname, "data");
 const TRADES_FILE = path.join(DATA_DIR, "trades.json");
 
-const dns = require("dns");
-dns.setDefaultResultOrder("ipv4first");
+// --- Logging ---
 
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  },
-  connectionTimeout: 30000,
-  greetingTimeout: 30000,
-  socketTimeout: 30000,
-  family: 4,
-});
+const LOG_FILE = path.join(DATA_DIR, "tracker.log");
+
+function log(message) {
+  const timestamp = new Date().toISOString();
+  const line = `[${timestamp}] ${message}`;
+  console.log(line);
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  fs.appendFileSync(LOG_FILE, line + "\n");
+}
 
 // --- Storage ---
 
@@ -68,12 +64,6 @@ async function fetchTrades() {
   const html = await res.text();
   const $ = cheerio.load(html);
 
-  // The article body contains all the trades.
-  // Each trade is a text block starting with a bold date like "MARCH 5:"
-  // We grab all text from the article content area.
-  const trades = [];
-
-  // Try multiple possible selectors for the article body
   const selectors = [
     "article",
     ".article-item__body",
@@ -94,36 +84,30 @@ async function fetchTrades() {
   }
 
   if (!articleHtml) {
-    // Fallback: use the entire page
     articleHtml = $.html();
   }
 
-  // Parse individual trades from the HTML text content.
-  // Trades follow the pattern: **DATE:** description
   const $article = cheerio.load(articleHtml);
   const fullText = $article.text();
 
-  // Split on the bold date pattern: "MONTH DAY:" (e.g., "MARCH 5:", "FEB. 28:")
   const tradePattern =
     /\b(JAN(?:UARY)?\.?|FEB(?:RUARY)?\.?|MARCH|APRIL|MAY|JUNE|JULY|AUG(?:UST)?\.?|SEPT(?:EMBER)?\.?|OCT(?:OBER)?\.?|NOV(?:EMBER)?\.?|DEC(?:EMBER)?\.?)\s+\d{1,2}:/gi;
 
   const matches = [...fullText.matchAll(tradePattern)];
+  const trades = [];
 
   for (let i = 0; i < matches.length; i++) {
     const start = matches[i].index;
     const end = i + 1 < matches.length ? matches[i + 1].index : fullText.length;
     let tradeText = fullText.slice(start, end).trim();
 
-    // Clean up whitespace and stray markdown bold markers
     tradeText = tradeText.replace(/\s+/g, " ").replace(/\*+/g, "").trim();
 
-    // Remove trailing link text after "|" if present
     const pipeIdx = tradeText.indexOf("|");
     if (pipeIdx !== -1) {
       tradeText = tradeText.slice(0, pipeIdx).trim();
     }
 
-    // Only include entries that look like actual trades
     if (
       tradeText.toLowerCase().includes("acquire") ||
       tradeText.toLowerCase().includes("trade") ||
@@ -137,71 +121,30 @@ async function fetchTrades() {
   return trades;
 }
 
-// --- Logging ---
-
-const LOG_FILE = path.join(DATA_DIR, "tracker.log");
-
-function log(message) {
-  const timestamp = new Date().toISOString();
-  const line = `[${timestamp}] ${message}`;
-  console.log(line);
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  fs.appendFileSync(LOG_FILE, line + "\n");
-}
-
 // --- Notifications ---
 
-function getNotifyEmails() {
-  const raw = process.env.NOTIFY_EMAILS || "";
-  return raw.split(",").map((e) => e.trim()).filter(Boolean);
-}
-
-function isSmsGateway(email) {
-  const smsGateways = [
-    "vtext.com", "txt.att.net", "tmomail.net", "messaging.sprintpcs.com",
-    "page.nextel.com", "myboostmobile.com", "sms.mycricket.com",
-    "text.republicwireless.com", "msg.fi.google.com",
-  ];
-  return smsGateways.some((g) => email.toLowerCase().endsWith(g));
-}
-
-async function sendEmail(message) {
-  const recipients = getNotifyEmails();
-  if (!recipients.length) return;
-
-  const emailAddrs = recipients.filter((r) => !isSmsGateway(r));
-  const smsAddrs = recipients.filter((r) => isSmsGateway(r));
-
-  // Send full message to email recipients
-  if (emailAddrs.length) {
-    try {
-      await transporter.sendMail({
-        from: process.env.GMAIL_USER,
-        to: emailAddrs.join(","),
-        subject: "NHL Trade Alert",
-        text: message,
-      });
-      log(`  Email sent to: ${emailAddrs.join(", ")}`);
-    } catch (err) {
-      log(`  Failed to send email: ${err.message}`);
-    }
+async function sendDiscord(message) {
+  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
+  if (!webhookUrl) {
+    log("  No DISCORD_WEBHOOK_URL configured, skipping notification.");
+    return;
   }
 
-  // Send truncated message to SMS gateways
-  if (smsAddrs.length) {
-    try {
-      await transporter.sendMail({
-        from: process.env.GMAIL_USER,
-        to: smsAddrs.join(","),
-        subject: "NHL Trade",
-        text: message.slice(0, 155),
-      });
-      log(`  SMS sent to: ${smsAddrs.join(", ")}`);
-    } catch (err) {
-      log(`  Failed to send SMS: ${err.message}`);
+  try {
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: message.slice(0, 2000) }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      log(`  Discord error (${res.status}): ${body}`);
+    } else {
+      log("  Discord notification sent.");
     }
+  } catch (err) {
+    log(`  Failed to send Discord notification: ${err.message}`);
   }
 }
 
@@ -235,7 +178,7 @@ async function checkForNewTrades() {
     log(`${newTrades.length} NEW trade(s) detected!`);
     for (const trade of newTrades) {
       log(`-> ${trade.slice(0, 100)}...`);
-      await sendEmail(trade);
+      await sendDiscord(trade);
     }
     saveSeenTrades(seen);
   } else {
@@ -251,8 +194,6 @@ async function main() {
 
   const interval = parseInt(process.env.POLL_INTERVAL_MINUTES, 10) || 5;
   log(`Poll interval: every ${interval} minute(s)`);
-  const emails = getNotifyEmails();
-  log(`Notifications: ${emails.length ? emails.join(", ") : "(not set)"}`);
 
   // Baseline: catalog all current trades without sending notifications
   log("Establishing baseline...");
@@ -268,8 +209,8 @@ async function main() {
     log(`Error establishing baseline: ${err.message}`);
   }
 
-  // Send startup notification to verify email is working
-  await sendEmail("Welcome to NHL Trade Tracker! Notifications are active.");
+  // Send startup notification to verify Discord is working
+  await sendDiscord("NHL Trade Tracker is online! You'll be notified of new trades.");
 
   // Then schedule periodic checks
   cron.schedule(`*/${interval} * * * *`, checkForNewTrades);
