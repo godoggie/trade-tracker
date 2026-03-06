@@ -137,6 +137,20 @@ async function fetchTrades() {
   return trades;
 }
 
+// --- Logging ---
+
+const LOG_FILE = path.join(DATA_DIR, "tracker.log");
+
+function log(message) {
+  const timestamp = new Date().toISOString();
+  const line = `[${timestamp}] ${message}`;
+  console.log(line);
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  fs.appendFileSync(LOG_FILE, line + "\n");
+}
+
 // --- Notifications ---
 
 function getNotifyEmails() {
@@ -144,38 +158,52 @@ function getNotifyEmails() {
   return raw.split(",").map((e) => e.trim()).filter(Boolean);
 }
 
-async function sendEmail(trade) {
+function isSmsGateway(email) {
+  const smsGateways = [
+    "vtext.com", "txt.att.net", "tmomail.net", "messaging.sprintpcs.com",
+    "page.nextel.com", "myboostmobile.com", "sms.mycricket.com",
+    "text.republicwireless.com", "msg.fi.google.com",
+  ];
+  return smsGateways.some((g) => email.toLowerCase().endsWith(g));
+}
+
+async function sendEmail(message) {
   const recipients = getNotifyEmails();
   if (!recipients.length) return;
 
-  try {
-    await transporter.sendMail({
-      from: process.env.GMAIL_USER,
-      to: recipients.join(","),
-      subject: "NHL Trade Alert",
-      text: trade,
-    });
-    console.log(`  Email sent to: ${recipients.join(", ")}`);
-  } catch (err) {
-    console.error(`  Failed to send email: ${err.message}`);
+  for (const to of recipients) {
+    // SMS gateways have ~160 char limit; truncate and strip subject
+    const sms = isSmsGateway(to);
+    const body = sms ? message.slice(0, 155) : message;
+
+    try {
+      await transporter.sendMail({
+        from: process.env.GMAIL_USER,
+        to,
+        subject: sms ? "" : "NHL Trade Alert",
+        text: body,
+      });
+      log(`  Email sent to ${to} (${sms ? "SMS" : "email"})`);
+    } catch (err) {
+      log(`  Failed to send to ${to}: ${err.message}`);
+    }
   }
 }
 
 // --- Main check loop ---
 
 async function checkForNewTrades() {
-  const now = new Date().toLocaleString();
-  console.log(`\n[${now}] Checking for new trades...`);
+  log("Checking for new trades...");
 
   let trades;
   try {
     trades = await fetchTrades();
   } catch (err) {
-    console.error(`  Error fetching trades: ${err.message}`);
+    log(`Error fetching trades: ${err.message}`);
     return;
   }
 
-  console.log(`  Found ${trades.length} total trades on page.`);
+  log(`Found ${trades.length} total trades on page.`);
 
   const seen = loadSeenTrades();
   const newTrades = [];
@@ -189,31 +217,30 @@ async function checkForNewTrades() {
   }
 
   if (newTrades.length > 0) {
-    console.log(`  ${newTrades.length} NEW trade(s) detected!`);
+    log(`${newTrades.length} NEW trade(s) detected!`);
     for (const trade of newTrades) {
-      console.log(`  -> ${trade.slice(0, 100)}...`);
-
+      log(`-> ${trade.slice(0, 100)}...`);
       await sendEmail(trade);
     }
     saveSeenTrades(seen);
   } else {
-    console.log("  No new trades.");
+    log("No new trades.");
   }
 }
 
 // --- Startup ---
 
 async function main() {
-  console.log("=== NHL Trade Tracker ===");
-  console.log(`Monitoring: ${NHL_URL}`);
+  log("=== NHL Trade Tracker ===");
+  log(`Monitoring: ${NHL_URL}`);
 
   const interval = parseInt(process.env.POLL_INTERVAL_MINUTES, 10) || 5;
-  console.log(`Poll interval: every ${interval} minute(s)`);
+  log(`Poll interval: every ${interval} minute(s)`);
   const emails = getNotifyEmails();
-  console.log(`Notifications: ${emails.length ? emails.join(", ") : "(not set)"}`);
+  log(`Notifications: ${emails.length ? emails.join(", ") : "(not set)"}`);
 
   // Baseline: catalog all current trades without sending notifications
-  console.log("\nEstablishing baseline...");
+  log("Establishing baseline...");
   try {
     const trades = await fetchTrades();
     const seen = loadSeenTrades();
@@ -221,9 +248,9 @@ async function main() {
       seen.add(hashTrade(trade));
     }
     saveSeenTrades(seen);
-    console.log(`  Baseline set: ${trades.length} existing trades cataloged.`);
+    log(`Baseline set: ${trades.length} existing trades cataloged.`);
   } catch (err) {
-    console.error(`  Error establishing baseline: ${err.message}`);
+    log(`Error establishing baseline: ${err.message}`);
   }
 
   // Send startup notification to verify email is working
@@ -231,10 +258,10 @@ async function main() {
 
   // Then schedule periodic checks
   cron.schedule(`*/${interval} * * * *`, checkForNewTrades);
-  console.log("\nScheduler running. Press Ctrl+C to stop.");
+  log("Scheduler running. Press Ctrl+C to stop.");
 }
 
 main().catch((err) => {
-  console.error("Fatal error:", err);
+  log(`Fatal error: ${err.message}`);
   process.exit(1);
 });
