@@ -10,6 +10,9 @@ const NHL_URL = "https://www.nhl.com/news/2025-26-nhl-trades";
 const DATA_DIR = path.join(__dirname, "data");
 const TRADES_FILE = path.join(DATA_DIR, "trades.json");
 
+const dns = require("dns");
+dns.setDefaultResultOrder("ipv4first");
+
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
