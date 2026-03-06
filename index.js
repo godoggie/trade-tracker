@@ -206,6 +206,9 @@ async function main() {
   const emails = getNotifyEmails();
   console.log(`Notifications: ${emails.length ? emails.join(", ") : "(not set)"}`);
 
+  // Send startup notification to verify email is working
+  await sendEmail("Welcome to NHL Trade Tracker! Notifications are active.");
+
   // Run immediately on startup
   await checkForNewTrades();
 
